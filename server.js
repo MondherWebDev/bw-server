@@ -5,15 +5,15 @@ import { WebSocketServer } from 'ws';
 const HOST = '0.0.0.0';
 const PORT = process.env.PORT || 3000;
 
-const DEFAULT_MAX   = Number(process.env.MAX_PLAYERS || 4);
-const MIN_TO_START  = 2;
-const DEFAULT_CATS  = 8;
+const DEFAULT_MAX = Number(process.env.MAX_PLAYERS || 4);
+const MIN_TO_START = 2;
+const DEFAULT_CATS = 8;
 
 const rooms = new Map();
 
-const now      = () => Date.now();
+const now = () => Date.now();
 const normCode = s => (s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
-const clampName= s => (s || '').toString().slice(0, 32);
+const clampName = s => (s || '').toString().slice(0, 32);
 
 function makeLimiter () {
   let tokens = 10, last = now();
@@ -40,7 +40,7 @@ function roomFor(code){
       answers: { host: null, guest: null },
       perRound: { host: [], guest: [] },
       running: { host: 0, guest: 0 },
-      lastScoredRound: 0
+      lastScoredRound: 0,
     };
     rooms.set(code, r);
   }
@@ -53,46 +53,46 @@ function pickHost(room){
     if (room.host) room.host.role = 'host';
   }
 }
+
 const roster = room => [...room.clients].map(ws => ({ role: ws.role, name: ws.name }));
-function broadcast(room, obj){
+
+function broadcast(room, obj) {
   const m = JSON.stringify(obj);
-  for (const ws of room.clients) { try { ws.send(m); } catch {} }
+  for (const ws of room.clients) {
+    try { ws.send(m); } catch {}
+  }
 }
 
-/* ---------- Arabic-aware normalization & validation ---------- */
-// remove tashkeel/harakat, tatweel, zero-width joiners, NBSP
+/* ---------------- Arabic normalization (same as client) ---------------- */
 const STRIP_MARKS_RE = /[\u0610-\u061A\u064B-\u065F\u06D6-\u06ED\u0640\u200C\u200D\u00A0]/g;
-function baseArabic(s) {
-  return String(s || '')
+function baseArabic(s){
+  return String(s||'')
     .toLowerCase()
-    .replace(STRIP_MARKS_RE, '')
-    .replace(/[إأآٱ]/g, 'ا')
-    .replace(/ة/g, 'ه')
-    .replace(/ى/g, 'ي')
-    .replace(/ؤ/g, 'و')
-    .replace(/ئ/g, 'ي')
+    .replace(STRIP_MARKS_RE,'') // tashkeel, tatweel, joiners, nbsp
+    .replace(/[إأآٱ]/g,'ا')
+    .replace(/ة/g,'ه')
+    .replace(/ى/g,'ي')
+    .replace(/ؤ/g,'و')
+    .replace(/ئ/g,'ي')
     .trim();
 }
-const onlyLetters = s => baseArabic(s).replace(/[^a-z\u0621-\u064A]/g, '');
-const hasMinLetters = s => onlyLetters(s).length >= 2;
-
-function startsWithLetter(ans, letter) {
-  const a = baseArabic(ans);
-  const L = baseArabic(letter || '');
-  // first meaningful letter of the normalized answer
-  const first = (a.match(/[a-z\u0621-\u064A]/) || [''])[0];
-  return first === L;
-}
-function isValid(ans, letter, requireLetter) {
+const LETTER_RE = /[a-z\u0621-\u064A]/;
+const onlyLetters = s => baseArabic(s).replace(/[^a-z\u0621-\u064A]/g,'');
+const firstLetter = s => {
+  const m = baseArabic(s).match(LETTER_RE);
+  return m ? m[0] : '';
+};
+function hasMinLetters(s){ return onlyLetters(s).length >= 2; }
+function isValid(ans, letter, requireLetter){
   if (!ans) return false;
-  if (!hasMinLetters(ans)) return false;          // 1 letter = 0
-  return requireLetter ? startsWithLetter(ans, letter) : true;
+  if (!hasMinLetters(ans)) return false;
+  return requireLetter ? (firstLetter(ans) === baseArabic(letter||'')) : true;
 }
-const normWord = s => baseArabic(s).replace(/[^a-z\u0621-\u064A]+/g, ' ').replace(/\s+/g, ' ').trim();
+const normWord = s => baseArabic(String(s||''));
 
-/* -------------------------- Scoring -------------------------- */
+/* ---------------- scoring ---------------- */
 function scoreRound(room){
-  // avoid double scoring for same round
+  // avoid double-scoring the same round
   if (room.lastScoredRound === room.round) return;
 
   const hostAns  = Array.isArray(room.answers.host)  ? room.answers.host  : [];
@@ -103,15 +103,11 @@ function scoreRound(room){
   for (let i = 0; i < n; i++) {
     const ha = hostAns[i]  || '';
     const ga = guestAns[i] || '';
-
     const hv = isValid(ha, room.letter, room.rules.requireLetter);
     const gv = isValid(ga, room.letter, room.rules.requireLetter);
-
-    const dup = hv && gv && normWord(ha) === normWord(ga); // <- robust duplicate check
-
+    const dup = hv && gv && normWord(ha) === normWord(ga);
     const sH = hv ? (dup && room.rules.dupZero ? 0 : 1) : 0;
     const sG = gv ? (dup && room.rules.dupZero ? 0 : 1) : 0;
-
     rH += sH; rG += sG;
   }
 
@@ -124,17 +120,17 @@ function scoreRound(room){
   broadcast(room, {
     t: 'scores',
     perRound: { host: rH, guest: rG },
-    running : room.running,
-    // back-compat for older clients
-    scores  : { totals: { host: rH, guest: rG } }
+    running: room.running,
+    // backwards compatibility for older clients
+    scores: { totals: { host: rH, guest: rG } },
   });
 
-  // clear for next round
-  room.answers.host  = null;
+  // clear stored answers for next round
+  room.answers.host = null;
   room.answers.guest = null;
 }
 
-/* ------------------------- HTTP + WS ------------------------- */
+/* ---------------- HTTP + WS ---------------- */
 const httpServer = http.createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'content-type': 'text/plain' });
@@ -148,21 +144,21 @@ const httpServer = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server: httpServer });
 
 wss.on('connection', (ws) => {
-  ws.isAlive  = true;
-  ws.limiter  = makeLimiter();
+  ws.isAlive = true;
+  ws.limiter = makeLimiter();
   ws.on('pong', () => (ws.isAlive = true));
 
   ws.on('message', (buf) => {
     if (!ws.limiter()) return;
     let m; try { m = JSON.parse(buf); } catch { return; }
 
+    // join
     if (m.t === 'join') {
       const code = normCode(m.code); if (!code) return;
       ws.code = code; ws.name = clampName(m.name || '');
       const room = roomFor(code);
 
-      if (room.clients.size === 0 &&
-          Number(m.maxPlayers) >= 2 && Number(m.maxPlayers) <= 8) {
+      if (room.clients.size === 0 && Number(m.maxPlayers) >= 2 && Number(m.maxPlayers) <= 8) {
         room.maxPlayers = Number(m.maxPlayers);
       }
       if (room.clients.size >= room.maxPlayers) {
@@ -179,7 +175,9 @@ wss.on('connection', (ws) => {
       broadcast(room, { t: 'roster', list });
       broadcast(room, { t: 'peer-count', n: room.clients.size, max: room.maxPlayers });
       try {
-        ws.send(JSON.stringify({ t: 'joined', code, role: ws.role, max: room.maxPlayers, list, lang: room.lang }));
+        ws.send(JSON.stringify({
+          t: 'joined', code, role: ws.role, max: room.maxPlayers, list, lang: room.lang
+        }));
       } catch {}
       return;
     }
@@ -220,19 +218,19 @@ wss.on('connection', (ws) => {
       room.round  = Number(m.round) || 1;
       room.total  = Number(m.total) || 60;
       room.letter = (m.letter || '').toString().slice(0, 2);
-      room.answers.host  = null;
+      room.answers.host = null;
       room.answers.guest = null;
       const deadline = now() + room.total * 1000;
       broadcast(room, { t: 'start', round: room.round, letter: room.letter, total: room.total, deadline });
       return;
     }
 
-    // Either side can finish → broadcast stop and score once
     if (m.t === 'finish') {
       const room = rooms.get(ws.code); if (!room) return;
+      // ensure both are arrays so we can score even if one didn’t submit
       room.answers.host  ??= [];
       room.answers.guest ??= [];
-      broadcast(room, { t: 'finish' });
+      broadcast(room, { t: 'finish' }); // stop everyone immediately
       scoreRound(room);
       return;
     }
@@ -242,14 +240,14 @@ wss.on('connection', (ws) => {
       const ans = Array.isArray(m.answers) ? m.answers.map(x => String(x || '').slice(0, 64)) : [];
       if (ws === room.host) room.answers.host = ans; else room.answers.guest = ans;
 
-      // (optional) let both sides know we received answers — helps client fallbacks
-      try { broadcast(room, { t: 'answers', role: ws === room.host ? 'host' : 'guest', answers: ans }); } catch {}
+      // optional echo so host can fallback-score if needed
+      broadcast(room, { t: 'answers', role: ws === room.host ? 'host' : 'guest', answers: ans });
 
       if (room.answers.host && room.answers.guest) scoreRound(room);
       return;
     }
 
-    // host can rebroadcast a computed score if using a client fallback
+    // optional: host rebroadcasts scores (rarely needed)
     if (m.t === 'scores') {
       const room = rooms.get(ws.code); if (!room || ws !== room.host) return;
       broadcast(room, m);
@@ -260,8 +258,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     const code = ws.code; if (!code) return;
     const room = rooms.get(code); if (!room) return;
-    room.clients.delete(ws);
-    pickHost(room);
+    room.clients.delete(ws); pickHost(room);
 
     if (room.clients.size === 0) {
       rooms.delete(code);
@@ -273,18 +270,18 @@ wss.on('connection', (ws) => {
   });
 });
 
-/* -------- keep-alive pings (free-tier friendly) -------- */
+/* keep-alive pings (helps free-tier stability) */
 setInterval(() => {
   for (const ws of wss.clients) {
-    if (ws.isAlive === false) { try { ws.terminate(); } catch {}; continue; }
+    if (ws.isAlive === false) { try { ws.terminate(); } catch {} ; continue; }
     ws.isAlive = false; try { ws.ping(); } catch {}
   }
 }, 30000);
 
-/* ---- listen on 0.0.0.0 so Render detects port ---- */
+/* listen on 0.0.0.0 so Render detects the open port */
 httpServer.listen(PORT, HOST, () => {
   console.log(`WS server listening on http://${HOST}:${PORT}`);
 });
 
-process.on('uncaughtException',  err => console.error('Uncaught:', err));
-process.on('unhandledRejection', err => console.error('Unhandled:', err));
+process.on('uncaughtException', (err) => console.error('Uncaught:', err));
+process.on('unhandledRejection', (err) => console.error('Unhandled:', err));
