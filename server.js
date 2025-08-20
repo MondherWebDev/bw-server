@@ -40,7 +40,8 @@ function roomFor(code){
       answers: { host: null, guest: null },
       perRound: { host: [], guest: [] },
       running: { host: 0, guest: 0 },
-      lastScoredRound: 0,
+      scoredRound: 0,          // <- round already scored
+      scoreTimer: null         // <- pending force-score timer
     };
     rooms.set(code, r);
   }
@@ -82,13 +83,19 @@ function isValid(ans, letter, requireLetter) {
 
 const normWord = s => normalizeArabic(String(s || '').trim().toLowerCase());
 
-// ----- scoring -----
-function scoreRound(room){
-  // avoid double-scoring the same round
-  if (room.lastScoredRound === room.round) return;
+// ----- scoring (authoritative) -----
+function scoreRound(room, { force = false } = {}) {
+  // already scored this round (unless we force)
+  if (!force && room.scoredRound === room.round) return;
 
-  const hostAns  = Array.isArray(room.answers.host)  ? room.answers.host  : [];
-  const guestAns = Array.isArray(room.answers.guest) ? room.answers.guest : [];
+  const haveHost  = Array.isArray(room.answers.host);
+  const haveGuest = Array.isArray(room.answers.guest);
+
+  // if we don't have both and not forcing (timeout), wait
+  if (!force && !(haveHost && haveGuest)) return;
+
+  const hostAns  = haveHost  ? room.answers.host  : [];
+  const guestAns = haveGuest ? room.answers.guest : [];
   const n = Math.max(hostAns.length, guestAns.length, DEFAULT_CATS);
 
   let rH = 0, rG = 0;
@@ -107,7 +114,7 @@ function scoreRound(room){
   room.perRound.guest.push(rG);
   room.running.host += rH;
   room.running.guest += rG;
-  room.lastScoredRound = room.round;
+  room.scoredRound = room.round;
 
   broadcast(room, {
     t: 'scores',
@@ -117,9 +124,10 @@ function scoreRound(room){
     scores: { totals: { host: rH, guest: rG } },
   });
 
-  // clear stored answers for next round
+  // clear stored answers & timers for next round
   room.answers.host = null;
   room.answers.guest = null;
+  if (room.scoreTimer) { clearTimeout(room.scoreTimer); room.scoreTimer = null; }
 }
 
 // ----- HTTP + WS -----
@@ -209,9 +217,12 @@ wss.on('connection', (ws) => {
       }
       room.round  = Number(m.round) || 1;
       room.total  = Number(m.total) || 60;
-      room.letter = (m.letter || '').toString().slice(0, 2); // (client already picks)
+      room.letter = (m.letter || '').toString().slice(0, 2);
       room.answers.host = null;
       room.answers.guest = null;
+      room.scoredRound = 0;
+      if (room.scoreTimer) { clearTimeout(room.scoreTimer); room.scoreTimer = null; }
+
       const deadline = now() + room.total * 1000;
       broadcast(room, { t: 'start', round: room.round, letter: room.letter, total: room.total, deadline });
       return;
@@ -219,11 +230,10 @@ wss.on('connection', (ws) => {
 
     if (m.t === 'finish') {
       const room = rooms.get(ws.code); if (!room) return;
-      // ensure both are arrays so we can score even if one didn’t submit
-      room.answers.host  ??= [];
-      room.answers.guest ??= [];
       broadcast(room, { t: 'finish' });
-      scoreRound(room);
+      // give a brief window for late answers, then force-score
+      if (room.scoreTimer) clearTimeout(room.scoreTimer);
+      room.scoreTimer = setTimeout(() => scoreRound(room, { force: true }), 1500);
       return;
     }
 
@@ -231,11 +241,13 @@ wss.on('connection', (ws) => {
       const room = rooms.get(ws.code); if (!room) return;
       const ans = Array.isArray(m.answers) ? m.answers.map(x => String(x || '').slice(0, 64)) : [];
       if (ws === room.host) room.answers.host = ans; else room.answers.guest = ans;
-      if (room.answers.host && room.answers.guest) scoreRound(room);
+
+      // if both are present now, score immediately
+      scoreRound(room, { force: true });
       return;
     }
 
-    // optional: host rebroadcasts scores (not usually needed)
+    // optional: host rebroadcasts scores (client fallback)
     if (m.t === 'scores') {
       const room = rooms.get(ws.code); if (!room || ws !== room.host) return;
       broadcast(room, m);
